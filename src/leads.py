@@ -1,8 +1,13 @@
 import os
+import anthropic
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
+CHANNEL_ID = -1003870890884
+
+client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 (NAME, CITY, ADDRESS, SERVICE,
  CLEANING_TYPE, CLEANING_AREA,
@@ -70,6 +75,15 @@ MATTRESS_SIZES = [
     "Двоспальний — від 1 100 грн"
 ]
 
+SYSTEM_PROMPT = """Ти — дружелюбний менеджер сервісу прибирання та хімчистки. 
+Відповідай коротко, по справі, українською мовою.
+Якщо клієнт питає про ціни:
+- Генеральне прибирання: від 4000 грн (40-60м²), від 6000 грн (70-90м²), від 8400 грн (100-140м²)
+- Підтримуюче: від 2250 грн (40-60м²), від 4000 грн (70-90м²), від 3000 грн (100-140м²)
+- Хімчистка дивану: від 1100 грн (2-місний) до 2700 грн (великий модульний)
+- Хімчистка матраса: від 300 грн (дитячий) до 1100 грн (двоспальний)
+Якщо клієнт хоче замовити — скажи йому написати /start"""
+
 def kb(options, back=None):
     keyboard = [[InlineKeyboardButton(opt, callback_data=opt)] for opt in options]
     if back:
@@ -84,6 +98,29 @@ def get_cleaning_areas(cleaning_type):
     elif "Планувальне" in cleaning_type:
         return CLEANING_AREAS_PLAN
     return CLEANING_AREAS_GEN
+
+async def send_to_channel(context, summary):
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=f"🔔 *НОВА ЗАЯВКА!*\n\n{summary}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Помилка відправки в канал: {e}")
+
+async def ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_message = update.message.text
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}]
+        )
+        await update.message.reply_text(response.content[0].text)
+    except Exception:
+        await update.message.reply_text("Вибачте, сталася помилка. Спробуйте ще раз або напишіть /start")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
@@ -153,7 +190,7 @@ async def cleaning_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     if "Комбіноване" in query.data:
         await query.edit_message_text(
             "🔀 Комбіноване прибирання\n\n"
-            "🍳 Оберіть площу *кухні* (генеральне прибирання):",
+            "🍳 Оберіть площу *кухні*:",
             parse_mode="Markdown",
             reply_markup=kb(KITCHEN_AREAS, back="cleaning_type")
         )
@@ -161,7 +198,7 @@ async def cleaning_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         areas = get_cleaning_areas(query.data)
         await query.edit_message_text(
-            f"📐 Оберіть площу приміщення:",
+            "📐 Оберіть площу приміщення:",
             reply_markup=kb(areas, back="cleaning_type")
         )
         return CLEANING_AREA
@@ -194,7 +231,7 @@ async def combo_kitchen_area(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["kitchen_area"] = query.data
     await query.edit_message_text(
         f"🍳 Кухня: *{query.data}* ✅\n\n"
-        f"🚿 Оберіть площу *ванної кімнати* (генеральне прибирання):",
+        f"🚿 Оберіть площу *ванної кімнати*:",
         parse_mode="Markdown",
         reply_markup=kb(BATHROOM_AREAS, back="combo_kitchen")
     )
@@ -214,7 +251,7 @@ async def combo_bathroom_area(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(
         f"🍳 Кухня: *{context.user_data['kitchen_area']}* ✅\n"
         f"🚿 Ванна: *{query.data}* ✅\n\n"
-        f"🛏 Оберіть площу *кімнат* (генеральне прибирання):",
+        f"🛏 Оберіть площу *кімнат*:",
         parse_mode="Markdown",
         reply_markup=kb(ROOM_AREAS_GEN, back="combo_bathroom")
     )
@@ -349,6 +386,7 @@ async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 Бажана дата: {data.get('date')}\n"
         f"📞 Телефон: {data.get('phone')}"
     )
+    context.user_data["summary"] = summary
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🗓 Забронювати дату", callback_data="confirm")],
@@ -374,6 +412,8 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return NAME
     name = context.user_data.get("name", "")
     phone = context.user_data.get("phone", "")
+    summary = context.user_data.get("summary", "")
+    await send_to_channel(context, summary)
     await query.edit_message_text(
         f"🎉 {name}, дякуємо за замовлення!\n\n"
         f"Наш менеджер зателефонує вам на номер {phone} та підтвердить зручний час. ⏰\n\n"
@@ -410,4 +450,5 @@ conv_handler = ConversationHandler(
 )
 
 app.add_handler(conv_handler)
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_reply))
 app.run_polling()
